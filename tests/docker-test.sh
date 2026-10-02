@@ -13,8 +13,6 @@ readonly DEFAULT_IMAGE="ubuntu:24.04"
 readonly SRC_MOUNT="/src"
 readonly NVIM_MIN_VERSION="0.11.2"
 readonly LOCK_FILE="nvim-for-macmini/lazy-lock.json"
-readonly EXPECTED_BACKUPS=3 # .tmux.conf、.config/nvim、.local/share/nvim
-
 FAILURES=0
 
 run_container() {
@@ -96,6 +94,13 @@ unknown_argument_is_rejected() {
   [ "$status" -eq 1 ] && [[ "$output" == *"未知参数"* ]]
 }
 
+# run_inside 预置的三样东西都原样出现在 .bak.<时间戳> 备份里。
+seeded_configs_are_backed_up() {
+  grep -q "原有配置" "$HOME"/.tmux.conf.bak.* &&
+    grep -q "原有配置" "$HOME"/.config/nvim.bak.*/init.lua &&
+    ls "$HOME"/.local/share/nvim.bak.*/old-plugin-data
+}
+
 backup_count() {
   find "$HOME" -maxdepth 3 -name '*.bak.*' | wc -l | tr -d ' '
 }
@@ -139,12 +144,14 @@ run_inside() {
   echo "--- 第一次安装"
   bash "$repo/install.sh"
   run_checks "$repo"
-  check "原有的 3 处配置都被备份" test "$(backup_count)" -eq "$EXPECTED_BACKUPS"
+  check "预置的原有配置都被备份" seeded_configs_are_backed_up
+  local backups_after_first_run
+  backups_after_first_run="$(backup_count)"
 
   echo "--- 第二次安装(幂等性)"
   bash "$repo/install.sh"
   run_checks "$repo"
-  check "重复执行没有产生新备份" test "$(backup_count)" -eq "$EXPECTED_BACKUPS"
+  check "重复执行没有产生新备份" test "$(backup_count)" -eq "$backups_after_first_run"
 
   echo "--- 未知参数应报错"
   check "未知参数以退出码 1 报错" unknown_argument_is_rejected "$repo"
