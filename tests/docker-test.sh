@@ -13,6 +13,7 @@ readonly DEFAULT_IMAGE="ubuntu:24.04"
 readonly SRC_MOUNT="/src"
 readonly NVIM_MIN_VERSION="0.11.2"
 readonly LOCK_FILE="nvim-for-macmini/lazy-lock.json"
+readonly EXPECTED_BACKUPS=3 # .tmux.conf、.config/nvim、.local/share/nvim
 
 FAILURES=0
 
@@ -34,8 +35,9 @@ run_container() {
 # 以 root 进入容器后,按需建一个带免密 sudo 的普通用户并切换过去。
 switch_to_test_user() {
   local user=$1
-  apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sudo >/dev/null
+  echo "--- 准备普通用户 $user(安装 sudo)"
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends sudo
   useradd -m -s /bin/bash "$user"
   echo "$user ALL=(ALL) NOPASSWD:ALL" >"/etc/sudoers.d/$user"
   exec sudo -u "$user" -H bash "$SRC_MOUNT/tests/docker-test.sh" --inside
@@ -88,6 +90,12 @@ plugins_match_lockfile() {
   [ "$plugin_count" -gt 0 ]
 }
 
+unknown_argument_is_rejected() {
+  local repo=$1 output status=0
+  output="$(bash "$repo/install.sh" --bogus 2>&1)" || status=$?
+  [ "$status" -eq 1 ] && [[ "$output" == *"未知参数"* ]]
+}
+
 backup_count() {
   find "$HOME" -maxdepth 3 -name '*.bak.*' | wc -l | tr -d ' '
 }
@@ -118,20 +126,28 @@ run_inside() {
 
   local repo="$HOME/customization_config"
   cp -r "$SRC_MOUNT" "$repo"
-  echo "# 原有配置" >"$HOME/.tmux.conf" # 用来验证备份逻辑
+  # 把远端指向不存在的路径,保证被测内容不会被 install.sh 里的 git pull 换成 GitHub 上的版本。
+  # (此时容器里还没有 git,所以直接改配置文件。)
+  sed -i 's#^\([[:space:]]*url = \).*#\1/nonexistent#' "$repo/.git/config"
+
+  # 预置一份"原有配置",用来验证备份逻辑:tmux 配置、nvim 配置、nvim 数据目录。
+  echo "# 原有配置" >"$HOME/.tmux.conf"
+  mkdir -p "$HOME/.config/nvim" "$HOME/.local/share/nvim"
+  echo "-- 原有配置" >"$HOME/.config/nvim/init.lua"
+  touch "$HOME/.local/share/nvim/old-plugin-data"
 
   echo "--- 第一次安装"
   bash "$repo/install.sh"
   run_checks "$repo"
-  check "原有 .tmux.conf 被备份(恰好 1 个备份)" test "$(backup_count)" -eq 1
+  check "原有的 3 处配置都被备份" test "$(backup_count)" -eq "$EXPECTED_BACKUPS"
 
   echo "--- 第二次安装(幂等性)"
   bash "$repo/install.sh"
   run_checks "$repo"
-  check "重复执行没有产生新备份" test "$(backup_count)" -eq 1
+  check "重复执行没有产生新备份" test "$(backup_count)" -eq "$EXPECTED_BACKUPS"
 
   echo "--- 未知参数应报错"
-  check "未知参数返回非零" bash -c "! bash '$repo/install.sh' --bogus"
+  check "未知参数以退出码 1 报错" unknown_argument_is_rejected "$repo"
 
   if [ "$FAILURES" -gt 0 ]; then
     echo "### $FAILURES 项检查失败"

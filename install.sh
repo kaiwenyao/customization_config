@@ -10,6 +10,7 @@ set -Eeuo pipefail
 readonly REPO_URL="https://github.com/kaiwenyao/customization_config.git"
 readonly REPO_DIR="${CUSTOMIZATION_CONFIG_DIR:-$HOME/customization_config}"
 readonly NVIM_CONFIG_NAME="nvim-for-macmini"
+readonly NVIM_LAZY_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/nvim/lazy" # lazy.nvim 存放插件的目录
 readonly TMUX_CONFIG_PATH="tmux/tmux.conf"
 
 readonly NVIM_MIN_VERSION="0.11.2" # LazyVim 15.x 的最低要求
@@ -45,6 +46,8 @@ SHOULD_SYNC_PLUGINS=1
 ARCH=""     # x86_64 | arm64(Neovim、lazygit 的命名)
 ALT_ARCH="" # x64 | arm64(Node.js、tree-sitter 的命名)
 TMP_DIR=""
+PINNED_LOCK=""        # 同步插件期间保存的 lazy-lock.json 副本
+PINNED_LOCK_TARGET="" # 它要还原到的位置
 BACKUPS=()
 
 # --- 输出 ---
@@ -63,6 +66,10 @@ on_error() {
 }
 
 cleanup() {
+  # 插件同步被打断时,把 lazy.nvim 改写过的锁文件还原。
+  if [ -n "$PINNED_LOCK" ] && [ -f "$PINNED_LOCK" ]; then
+    cp "$PINNED_LOCK" "$PINNED_LOCK_TARGET" || true
+  fi
   if [ -n "$TMP_DIR" ]; then rm -rf "$TMP_DIR"; fi
 }
 
@@ -118,7 +125,7 @@ tmux_version() {
 }
 
 node_is_new_enough() {
-  has node || return 1
+  has node && has npm || return 1
   local major
   major="$(node --version 2>/dev/null | sed -nE 's/^v([0-9]+).*/\1/p')"
   [ "${major:-0}" -ge "$NODE_MIN_MAJOR" ]
@@ -199,7 +206,7 @@ install_node_from_tarball() {
 
   as_root rm -rf "$OPT_DIR/node"
   as_root mkdir -p "$OPT_DIR/node"
-  as_root tar -xzf "$TMP_DIR/$tarball" -C "$OPT_DIR/node" --strip-components=1
+  as_root tar -xzf "$TMP_DIR/$tarball" -C "$OPT_DIR/node" --strip-components=1 --no-same-owner
   local tool
   for tool in node npm npx; do
     as_root ln -sfn "$OPT_DIR/node/bin/$tool" "$BIN_DIR/$tool"
@@ -244,7 +251,7 @@ install_neovim() {
 
   as_root rm -rf "$OPT_DIR/nvim"
   as_root mkdir -p "$OPT_DIR/nvim"
-  as_root tar -xzf "$TMP_DIR/$tarball" -C "$OPT_DIR/nvim" --strip-components=1
+  as_root tar -xzf "$TMP_DIR/$tarball" -C "$OPT_DIR/nvim" --strip-components=1 --no-same-owner
   as_root ln -sfn "$OPT_DIR/nvim/bin/nvim" "$BIN_DIR/nvim"
   hash -r
 
@@ -387,14 +394,30 @@ apply_configs() {
   link_config "$nvim_src" "$nvim_dest"
 }
 
-# 打印没有检出到锁文件所记提交的插件名,每行一个。
+# 打印没有检出到锁文件所记提交的插件,每行一个:"<插件名> <锁定的提交>"。
 unpinned_plugins() {
   local lock_file=$1 name locked actual
-  local lazy_dir="${XDG_DATA_HOME:-$HOME/.local/share}/nvim/lazy"
   while read -r name locked; do
-    actual="$(git -C "$lazy_dir/$name" rev-parse HEAD 2>/dev/null)" || actual=""
-    [ "$actual" = "$locked" ] || echo "$name"
+    actual="$(git -C "$NVIM_LAZY_DIR/$name" rev-parse HEAD 2>/dev/null)" || actual=""
+    [ "$actual" = "$locked" ] || echo "$name $locked"
   done < <(sed -nE 's/^ *"([^"]+)": \{.*"commit": "([0-9a-f]+)".*/\1 \2/p' "$lock_file")
+}
+
+force_checkout_plugin() {
+  local dir=$1 commit=$2
+  rm -f "$dir/.git/index.lock"
+  git -C "$dir" checkout --force --quiet "$commit" 2>/dev/null && return 0
+  git -C "$dir" fetch --quiet origin "$commit" && git -C "$dir" checkout --force --quiet "$commit"
+}
+
+# lazy.nvim 的 git 任务超时被杀后,可能留下 index.lock 或半检出的工作区,之后它每次都会跳过
+# 这个插件。已经克隆下来的插件直接用 git 检出到锁定的提交。
+repair_unpinned_plugins() {
+  local lock_file=$1 name locked
+  while read -r name locked; do
+    [ -d "$NVIM_LAZY_DIR/$name/.git" ] || continue
+    force_checkout_plugin "$NVIM_LAZY_DIR/$name" "$locked" >>"$TMP_DIR/nvim-sync.log" 2>&1 || true
+  done < <(unpinned_plugins "$lock_file")
 }
 
 run_nvim_headless() {
@@ -417,6 +440,8 @@ sync_plugins() {
 
   log "按 lazy-lock.json 安装 Neovim 插件(首次需要几分钟)"
   cp "$lock_file" "$pinned_lock"
+  PINNED_LOCK="$pinned_lock"
+  PINNED_LOCK_TARGET="$lock_file"
 
   # lazy.nvim 首次启动分批安装,第一批装完就会改写锁文件,后面的插件拿到的是最新提交。
   # 所以第一遍只负责装齐,之后还原锁文件再 restore 到锁定的版本。
@@ -428,14 +453,15 @@ sync_plugins() {
     cp "$pinned_lock" "$lock_file"
     run_nvim_headless "+Lazy! restore" || true
     cp "$pinned_lock" "$lock_file"
-    remaining="$(unpinned_plugins "$pinned_lock" | tr '\n' ' ')"
+    repair_unpinned_plugins "$pinned_lock"
+    remaining="$(unpinned_plugins "$pinned_lock" | cut -d' ' -f1 | tr '\n' ' ')"
     [ -z "$remaining" ] && return 0
     log "第 $attempt/$PLUGIN_RESTORE_MAX_ATTEMPTS 次恢复后仍有插件不在锁定版本:$remaining"
   done
 
-  warn "这些插件没能恢复到 lazy-lock.json 锁定的版本(多半是网络超时):$remaining"
-  warn "配置仍然可用;网络好的时候在 nvim 里执行 :Lazy restore 即可。最后的输出:"
-  tail -n 20 "$TMP_DIR/nvim-sync.log" >&2
+  warn "这些插件没能恢复到 lazy-lock.json 锁定的版本(多半是网络问题):$remaining"
+  warn "配置仍然可用;网络好的时候在 nvim 里执行 :Lazy restore 即可。相关报错:"
+  grep -iE 'fatal|error|timeout|unable' "$TMP_DIR/nvim-sync.log" | tail -n 20 >&2 || true
 }
 
 reload_tmux() {
@@ -473,6 +499,7 @@ main() {
 
   TMP_DIR="$(mktemp -d)"
   trap cleanup EXIT
+  trap 'exit 130' INT TERM
   trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
   install_apt_packages
