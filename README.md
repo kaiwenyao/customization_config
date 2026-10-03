@@ -7,6 +7,47 @@
 | `tmux/tmux.conf` | tmux 配置 | `~/.tmux.conf` |
 | `nvim-for-macmini/` | Neovim 配置(基于 LazyVim) | `~/.config/nvim` |
 | `config_of_vim` | 旧的 Vim 配置 | `~/.vimrc` |
+| `install.sh` | Debian / Ubuntu 一键安装脚本 | — |
+
+## Linux 一键安装(Debian / Ubuntu)
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/kaiwenyao/customization_config/master/install.sh)
+```
+
+root 或带 sudo 的普通用户都可以执行(普通用户请直接执行,不要在前面加 `sudo`,脚本会在需要时自己调用),支持 x86_64 和 arm64。脚本会:
+
+- 用 apt 安装 tmux、git、ripgrep、fd、编译器、python3-venv 等依赖
+- 把 Neovim 官方最新版装到 `/opt/nvim`(apt 里的版本低于 LazyVim 的要求),Node.js 官方二进制装到 `/opt/node`,lazygit 和 tree-sitter CLI 装到 `/usr/local/bin`
+- 把仓库克隆到 `~/customization_config`,并软链 `~/.tmux.conf` 和 `~/.config/nvim`
+- 按 `lazy-lock.json` 无头安装 Neovim 插件
+
+官方预编译的 tree-sitter CLI 要求 glibc 2.39(Ubuntu 24.04、Debian 13 及以上)。在更旧的系统上(Ubuntu 22.04、Debian 12),脚本会用临时的 Rust 工具链从源码编译它,多花几分钟,编译完工具链即删除。
+
+已有的配置不会被删除,而是改名为 `<原路径>.bak.<时间戳>`。脚本可以重复执行,已经装好的部分会跳过。
+
+装完后执行 `nvim`,首次启动还会继续安装 LSP(Mason)和语法解析器,等它装完后重启一次。图标需要在**本地终端**里启用一个 [Nerd Font](https://www.nerdfonts.com/)。
+
+可选参数加在命令末尾:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/kaiwenyao/customization_config/master/install.sh) --with-java
+```
+
+| 参数 | 作用 |
+|---|---|
+| `--with-java` | 额外安装 JDK 21(Java LSP 需要,体积较大所以默认不装) |
+| `--no-sync` | 跳过无头安装插件,留到首次打开 `nvim` 时再装 |
+
+环境变量 `CUSTOMIZATION_CONFIG_DIR` 可以改变仓库的克隆位置。
+
+改动脚本后,可以在容器里端到端验证(需要 Docker):
+
+```bash
+tests/docker-test.sh ubuntu:24.04
+```
+
+下面是 macOS 上的手动步骤。
 
 ## 拉取仓库
 
@@ -47,7 +88,7 @@ tmux source-file ~/.tmux.conf
 - 窗口和窗格从 1 开始编号,关闭窗口后自动重新编号
 - 真彩色(`tmux-256color` + RGB)
 - 分屏和新窗口沿用当前目录
-- 复制模式使用 vi 键位,复制内容通过 `pbcopy` 进入 macOS 剪贴板
+- 复制模式使用 vi 键位,复制内容进入系统剪贴板(macOS 和 Linux 通用)
 
 ### 常用键位
 
@@ -64,7 +105,10 @@ tmux source-file ~/.tmux.conf
 
 开启鼠标后,终端自带的拖选会被 tmux 接管,拖选结束即复制到系统剪贴板。
 
-复制到剪贴板依赖 `pbcopy`,只在 macOS 上可用;在 Linux 上需要把 `tmux.conf` 里的 `pbcopy` 换成 `xclip -selection clipboard` 或 `wl-copy`。
+复制到剪贴板有两条路,配置会自动选择:
+
+- 本机有剪贴板工具时直接调用:macOS 用 `pbcopy`,Linux 桌面用 `wl-copy`(Wayland)或 `xclip`(X11)
+- 同时开启 OSC 52(`set-clipboard on`):通过 SSH 连到没有桌面的服务器时,复制内容会经终端传回本地剪贴板。这需要终端支持 OSC 52,比如 iTerm2、kitty、WezTerm、Ghostty、Windows Terminal
 
 ## Neovim
 
