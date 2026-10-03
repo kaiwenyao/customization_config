@@ -12,10 +12,10 @@
 ## Linux 一键安装(Debian / Ubuntu)
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/kaiwenyao/customization_config/master/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/kaiwenyao/customization_config/master/install.sh)
 ```
 
-root 或带 sudo 的普通用户都可以执行,支持 x86_64 和 arm64。脚本会:
+root 或带 sudo 的普通用户都可以执行(普通用户请直接执行,不要在前面加 `sudo`,脚本会在需要时自己调用),支持 x86_64 和 arm64。脚本会:
 
 - 用 apt 安装 tmux、git、ripgrep、fd、编译器、python3-venv 等依赖
 - 把 Neovim 官方最新版装到 `/opt/nvim`(apt 里的版本低于 LazyVim 的要求),Node.js 官方二进制装到 `/opt/node`,lazygit 和 tree-sitter CLI 装到 `/usr/local/bin`
@@ -31,7 +31,7 @@ root 或带 sudo 的普通用户都可以执行,支持 x86_64 和 arm64。脚本
 可选参数加在命令末尾:
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/kaiwenyao/customization_config/master/install.sh) --with-java
+bash <(curl -fsSL https://raw.githubusercontent.com/kaiwenyao/customization_config/master/install.sh) --with-java
 ```
 
 | 参数 | 作用 |

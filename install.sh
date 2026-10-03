@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Debian / Ubuntu 一键安装:tmux + Neovim(LazyVim)及本仓库的配置。
 #
-#   bash <(curl -Ls https://raw.githubusercontent.com/kaiwenyao/customization_config/master/install.sh)
+#   bash <(curl -fsSL https://raw.githubusercontent.com/kaiwenyao/customization_config/master/install.sh)
 #
 # 可重复执行;已有的配置会被改名备份,不会被删除。
 
@@ -29,6 +29,7 @@ readonly LAZYGIT_RELEASE_URL="https://github.com/jesseduffield/lazygit/releases"
 readonly NODE_DIST_URL="https://nodejs.org/dist"
 readonly TREE_SITTER_RELEASE_URL="https://github.com/tree-sitter/tree-sitter/releases/latest/download"
 readonly TREE_SITTER_PREBUILT_MIN_GLIBC="2.39" # 官方预编译的 tree-sitter CLI 的最低 glibc
+readonly TREE_SITTER_MIN_VERSION="0.26.1"      # nvim-treesitter main 分支的最低要求
 readonly RUSTUP_URL="https://sh.rustup.rs"
 
 readonly APT_PACKAGES=(
@@ -178,6 +179,11 @@ detect_platform() {
 }
 
 check_privileges() {
+  # sudo bash install.sh:旧版 sudo 会保留调用者的 HOME,配置和插件就会以 root 身份写进他的家目录。
+  if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] &&
+    [ "$HOME" != "$(getent passwd root | cut -d: -f6)" ]; then
+    die "不要用 sudo 运行本脚本。请直接以 $SUDO_USER 身份执行,脚本会在需要时自己调用 sudo。"
+  fi
   [ "$(id -u)" -eq 0 ] && return 0
   has sudo || die "当前不是 root 且没有 sudo,请用 root 执行或先安装 sudo。"
   log "需要 sudo 权限来安装软件包"
@@ -205,7 +211,7 @@ install_node_from_tarball() {
     die "Node.js 安装包校验失败:$tarball"
 
   as_root rm -rf "$OPT_DIR/node"
-  as_root mkdir -p "$OPT_DIR/node"
+  as_root install -d -m 0755 "$OPT_DIR/node"
   as_root tar -xzf "$TMP_DIR/$tarball" -C "$OPT_DIR/node" --strip-components=1 --no-same-owner
   local tool
   for tool in node npm npx; do
@@ -250,7 +256,7 @@ install_neovim() {
   download "$NVIM_RELEASE_URL/$tarball" "$TMP_DIR/$tarball"
 
   as_root rm -rf "$OPT_DIR/nvim"
-  as_root mkdir -p "$OPT_DIR/nvim"
+  as_root install -d -m 0755 "$OPT_DIR/nvim"
   as_root tar -xzf "$TMP_DIR/$tarball" -C "$OPT_DIR/nvim" --strip-components=1 --no-same-owner
   as_root ln -sfn "$OPT_DIR/nvim/bin/nvim" "$BIN_DIR/nvim"
   hash -r
@@ -303,8 +309,14 @@ build_tree_sitter_from_source() {
 }
 
 # nvim-treesitter 编译语法解析器要用 tree-sitter CLI。失败时只警告:Neovim 仍可用,只是没有语法高亮。
+tree_sitter_is_new_enough() {
+  local version
+  version="$(tree-sitter --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
+  [ -n "$version" ] && version_ge "$version" "$TREE_SITTER_MIN_VERSION"
+}
+
 install_tree_sitter() {
-  if has tree-sitter && tree-sitter --version >/dev/null 2>&1; then
+  if tree_sitter_is_new_enough; then
     log "tree-sitter CLI 已安装,跳过"
     return 0
   fi
@@ -319,7 +331,7 @@ install_tree_sitter() {
     build_tree_sitter_from_source || return 1
   fi
   hash -r
-  tree-sitter --version >/dev/null 2>&1 || return 1
+  tree_sitter_is_new_enough || return 1
 }
 
 # Debian 系把 fd 装成 fdfind,LazyVim 找的是 fd。
@@ -400,7 +412,7 @@ unpinned_plugins() {
   while read -r name locked; do
     actual="$(git -C "$NVIM_LAZY_DIR/$name" rev-parse HEAD 2>/dev/null)" || actual=""
     [ "$actual" = "$locked" ] || echo "$name $locked"
-  done < <(sed -nE 's/^ *"([^"]+)": \{.*"commit": "([0-9a-f]+)".*/\1 \2/p' "$lock_file")
+  done < <(sed -nE 's/^ *"([A-Za-z0-9._-]+)": \{.*"commit": "([0-9a-f]+)".*/\1 \2/p' "$lock_file")
 }
 
 force_checkout_plugin() {
@@ -426,6 +438,8 @@ run_nvim_headless() {
 
 sync_plugins() {
   [ "$SHOULD_SYNC_PLUGINS" -eq 1 ] || return 0
+  # 接下来会运行第三方插件代码,先清掉 sudo 凭据缓存,免得它们免密拿到 root。
+  if [ "$(id -u)" -ne 0 ]; then sudo -k; fi
   local lock_file="$REPO_DIR/$NVIM_CONFIG_NAME/lazy-lock.json"
   local pinned_lock="$TMP_DIR/lazy-lock.json"
   if [ ! -f "$lock_file" ]; then

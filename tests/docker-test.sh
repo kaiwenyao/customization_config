@@ -101,6 +101,13 @@ seeded_configs_are_backed_up() {
     ls "$HOME"/.local/share/nvim.bak.*/old-plugin-data
 }
 
+# 模拟旧版 sudo 保留调用者 HOME 的情形:root 身份、带 SUDO_USER、HOME 不是 root 的。
+sudo_bash_is_rejected() {
+  local repo=$1 output status=0
+  output="$(SUDO_USER=tester HOME=/tmp bash "$repo/install.sh" 2>&1)" || status=$?
+  [ "$status" -eq 1 ] && [[ "$output" == *"不要用 sudo 运行"* ]]
+}
+
 backup_count() {
   find "$HOME" -maxdepth 3 -name '*.bak.*' | wc -l | tr -d ' '
 }
@@ -155,6 +162,11 @@ run_inside() {
 
   echo "--- 未知参数应报错"
   check "未知参数以退出码 1 报错" unknown_argument_is_rejected "$repo"
+
+  if [ "$(id -u)" -eq 0 ]; then
+    echo "--- 用 sudo bash 运行应报错"
+    check "sudo bash 运行时拒绝执行" sudo_bash_is_rejected "$repo"
+  fi
 
   if [ "$FAILURES" -gt 0 ]; then
     echo "### $FAILURES 项检查失败"
